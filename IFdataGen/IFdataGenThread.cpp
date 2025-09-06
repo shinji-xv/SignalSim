@@ -45,6 +45,7 @@ int QuantSamplesIQ2(complex_number Samples[], int Length, unsigned char QuantSam
 int QuantSamplesIQ4(complex_number Samples[], int Length, unsigned char QuantSamples[], double GainScale);
 int QuantSamplesIQ8(complex_number Samples[], int Length, unsigned char QuantSamples[], double GainScale);
 int QuantSamplesIQ16(complex_number Samples[], int Length, unsigned char QuantSamples[], double GainScale);
+int QuantSamplesSC16Q11(complex_number Samples[], int Length, unsigned char QuantSamples[], double GainScale);
 
 void ShowHelp(const char* ProgramName);
 bool ParseCommandLineArgs(int argc, char* argv[], CommandArguments &Arguments);
@@ -577,7 +578,7 @@ int main(int argc, char* argv[])
 
 	// Calculate total data size and setup progress tracking
 	int totalDurationMs = (int)(Trajectory.GetTimeLength() * 1000);
-	double bytesPerMs = OutputParam.SampleFreq *  ((OutputParam.Format == OutputFormatIQ2) ? 0.5 : (OutputParam.Format == OutputFormatIQ4) ? 1.0: (OutputParam.Format == OutputFormatIQ16) ? 4.0 : 2.0);
+	double bytesPerMs = OutputParam.SampleFreq *  ((OutputParam.Format == OutputFormatIQ2) ? 0.5 : (OutputParam.Format == OutputFormatIQ4) ? 1.0: ((OutputParam.Format == OutputFormatIQ16)||(OutputParam.Format == OutputFormatSC16Q11)) ? 4.0 : 2.0);
 	double totalMB = (totalDurationMs * bytesPerMs) / (1024.0 * 1024.0);
 	long long TotalClippedSamples = 0;
 	long long TotalSamples = 0;
@@ -585,7 +586,7 @@ int main(int argc, char* argv[])
 	printf("[INFO]\tStarting signal generation loop...\n");
 	printf("[INFO]\tSignal Duration: %0.2f s\n", totalDurationMs/1000.0);
 	printf("[INFO]\tSignal Size: %.2f MB\n", totalMB);
-	printf("[INFO]\tSignal Data format: %s\n", (OutputParam.Format == OutputFormatIQ2) ? "IQ2" : (OutputParam.Format == OutputFormatIQ4) ? "IQ4":(OutputParam.Format == OutputFormatIQ16) ? "IQ16" : "IQ8");
+	printf("[INFO]\tSignal Data format: %s\n", (OutputParam.Format == OutputFormatIQ2) ? "IQ2" : (OutputParam.Format == OutputFormatIQ4) ? "IQ4":(OutputParam.Format == OutputFormatIQ16) ? "IQ16" :(OutputParam.Format == OutputFormatSC16Q11)? "SC16Q11": "IQ8");
 	printf("[INFO]\tSignal Center freq: %0.4f MHz\n", OutputParam.CenterFreq/1000.0);
 	printf("[INFO]\tSignal Sample rate: %0.4f MHz\n\n", OutputParam.SampleFreq/1000.0);
 	fflush(stdout);
@@ -630,7 +631,12 @@ int main(int argc, char* argv[])
 				NoiseArray[j] += SatIfSignal[i]->SampleArray[j];
 		}
 
-		if (OutputParam.Format == OutputFormatIQ2) 
+		if (OutputParam.Format == OutputFormatSC16Q11) 
+		{
+			TotalClippedSamples += QuantSamplesSC16Q11(NoiseArray, OutputParam.SampleFreq, QuantArray, AGCGain);
+			fwrite(QuantArray, sizeof(unsigned char) * 4, OutputParam.SampleFreq, IfFile); // 4 bytes/sample
+		}
+		else if (OutputParam.Format == OutputFormatIQ2) 
 		{
 			TotalClippedSamples += QuantSamplesIQ2(NoiseArray, OutputParam.SampleFreq, QuantArray, AGCGain);
 			// Pack 2 samples per byte
@@ -1075,6 +1081,52 @@ int QuantSamplesIQ16(complex_number Samples[], int Length, unsigned char QuantSa
     return ClippedCount;
 }
 
+// SC16 Q11 quantization for BladeRF (12-bit signed integers)
+int QuantSamplesSC16Q11(complex_number Samples[], int Length, unsigned char QuantSamples[], double GainScale)
+{
+    int i;
+    int QuantValue;
+    const double Gain = GainScale * 2048.0; // Scale to [-2048, 2047] range
+    int ClippedCount = 0;
+
+    for (i = 0; i < Length; i++)
+    {
+        // Real part
+        QuantValue = (int)(Samples[i].real * Gain);
+        if (QuantValue > 2047)
+        {
+            QuantValue = 2047;
+            ClippedCount++;
+        }
+        else if (QuantValue < -2048)
+        {
+            QuantValue = -2048;
+            ClippedCount++;
+        }
+        // Store as little-endian 16-bit
+        QuantSamples[i * 4] = (unsigned char)(QuantValue & 0xff);
+        QuantSamples[i * 4 + 1] = (unsigned char)((QuantValue >> 8) & 0xff);
+
+        // Imaginary part
+        QuantValue = (int)(Samples[i].imag * Gain);
+        if (QuantValue > 2047)
+        {
+            QuantValue = 2047;
+            ClippedCount++;
+        }
+        else if (QuantValue < -2048)
+        {
+            QuantValue = -2048;
+            ClippedCount++;
+        }
+        // Store as little-endian 16-bit
+        QuantSamples[i * 4 + 2] = (unsigned char)(QuantValue & 0xff);
+        QuantSamples[i * 4 + 3] = (unsigned char)((QuantValue >> 8) & 0xff);
+    }
+
+    return ClippedCount;
+}
+
 void ShowHelp(const char* ProgramPath)
 {
 	// Extract just the executable name from the path
@@ -1186,7 +1238,11 @@ void CreateTagFile(const std::string& tagFilePath, const OUTPUT_PARAM& outputPar
     const char* iqStr;
     const char* bitsStr;
 
-    if (outputParam.Format == OutputFormatIQ2) {
+    if (outputParam.Format == OutputFormatSC16Q11) {
+        formatStr = "SC16Q11";
+        iqStr = "2";     // Complex I/Q
+        bitsStr = "16";  // 16-bit signed integers
+    } else if (outputParam.Format == OutputFormatIQ2) {
         formatStr = "INT2X2";
         iqStr = "1";
         bitsStr = "2";

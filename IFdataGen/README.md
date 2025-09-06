@@ -1,3 +1,7 @@
+---
+marp: true
+---
+
 # IFdataGen - SignalSim IF Data Generator
 
 ## Overview
